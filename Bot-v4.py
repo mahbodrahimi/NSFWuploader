@@ -120,31 +120,6 @@ def get_missing_sponsors(user_id, video_id):
     
     return missing
 
-# ==================== PINNED NOTIFICATION ====================
-def send_pinned_notification(chat_id, message_text):
-    """ارسال پیام پین شده در صورت عدم وجود ویدیو"""
-    try:
-        # ارسال پیام جدید
-        sent_msg = bot.send_message(
-            chat_id,
-            f"❌ {message_text}",
-            parse_mode='Markdown'
-        )
-        # پین کردن پیام
-        bot.pin_chat_message(chat_id, sent_msg.message_id)
-        return sent_msg
-    except Exception as e:
-        print(f"Error sending pinned message: {e}")
-        return None
-
-def unpin_and_delete_message(chat_id, message_id):
-    """حذف پیام پین شده"""
-    try:
-        bot.unpin_chat_message(chat_id, message_id)
-        bot.delete_message(chat_id, message_id)
-    except Exception as e:
-        print(f"Error unpinning message: {e}")
-
 # ==================== KEYBOARD GENERATORS ====================
 def generate_main_admin_keyboard():
     keyboard = types.InlineKeyboardMarkup(row_width=1)
@@ -238,11 +213,7 @@ def handle_start(message):
         video = get_video(video_id)
         
         if not video:
-            # ارسال پیام پین شده در صورت عدم وجود ویدیو
-            send_pinned_notification(
-                message.chat.id,
-                "ویدیو مورد نظر یافت نشد! احتمالاً حذف شده است."
-            )
+            bot.reply_to(message, "❌ ویدیوی مورد نظر وجود ندارد")
             return
         
         missing_sponsors = get_missing_sponsors(user_id, video_id)
@@ -420,21 +391,20 @@ def handle_callback(call):
     # User Callbacks
     elif data.startswith("check_sponsors_"):
         video_id = data.replace("check_sponsors_", "")
+        
+        # بررسی وجود ویدیو
+        video = get_video(video_id)
+        if not video:
+            bot.answer_callback_query(call.id, "❌ ویدیوی مورد نظر وجود ندارد", show_alert=True)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+            return
+        
         missing_sponsors = get_missing_sponsors(user_id, video_id)
         
         if not missing_sponsors:
             bot.answer_callback_query(call.id, "✅ عضویت شما تایید شد!")
-            video = get_video(video_id)
-            if video:
-                send_video_to_user(call.message.chat.id, video, user_id)
-                bot.delete_message(call.message.chat.id, call.message.message_id)
-            else:
-                # ارسال پیام پین شده در صورت عدم وجود ویدیو
-                send_pinned_notification(
-                    call.message.chat.id,
-                    "ویدیو مورد نظر یافت نشد! احتمالاً حذف شده است. ❌"
-                )
-                bot.delete_message(call.message.chat.id, call.message.message_id)
+            send_video_to_user(call.message.chat.id, video, user_id)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
         else:
             bot.answer_callback_query(call.id, "❌ هنوز در همه کانال‌ها عضو نیستید!")
             bot.edit_message_text(
@@ -447,20 +417,20 @@ def handle_callback(call):
     
     elif data.startswith("verify_membership_"):
         video_id = data.replace("verify_membership_", "")
+        
+        # بررسی وجود ویدیو
+        video = get_video(video_id)
+        if not video:
+            bot.answer_callback_query(call.id, "❌ ویدیوی مورد نظر وجود ندارد", show_alert=True)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+            return
+        
         missing_sponsors = get_missing_sponsors(user_id, video_id)
         
         if not missing_sponsors:
-            video = get_video(video_id)
-            if video:
-                send_video_to_user(call.message.chat.id, video, user_id)
-                bot.delete_message(call.message.chat.id, call.message.message_id)
-            else:
-                # ارسال پیام پین شده در صورت عدم وجود ویدیو
-                send_pinned_notification(
-                    call.message.chat.id,
-                    "ویدیو مورد نظر یافت نشد! احتمالاً حذف شده است. ❌"
-                )
-                bot.delete_message(call.message.chat.id, call.message.message_id)
+            bot.answer_callback_query(call.id, "✅ عضویت شما تایید شد!")
+            send_video_to_user(call.message.chat.id, video, user_id)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
         else:
             bot.answer_callback_query(call.id, "❌ هنوز در همه کانال‌ها عضو نیستید!")
 
@@ -624,11 +594,7 @@ def send_video_to_user(chat_id, video, user_id):
         # بررسی وجود ویدیو در لیست
         video_check = get_video(video["id"])
         if not video_check:
-            # ارسال پیام پین شده
-            send_pinned_notification(
-                chat_id,
-                "ویدیو مورد نظر یافت نشد! احتمالاً حذف شده است."
-            )
+            bot.send_message(chat_id, "❌ ویدیوی مورد نظر وجود ندارد")
             return
         
         # ارسال ویدیو
@@ -658,10 +624,10 @@ def schedule_delete(chat_id, message_id, video, delay):
         # بررسی وجود ویدیو قبل از حذف
         video_check = get_video(video["id"])
         if not video_check:
-            # اگر ویدیو وجود نداشت، پیام پین شده ارسال کن
-            send_pinned_notification(
+            # اگر ویدیو وجود نداشت، پیام خطا ارسال کن
+            bot.send_message(
                 chat_id,
-                "این ویدیو قبلاً حذف شده است و دیگر قابل دسترسی نیست! ❌"
+                "❌ ویدیوی مورد نظر وجود ندارد"
             )
             return
             
