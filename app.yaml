@@ -1,0 +1,8 @@
+kind: wasmer.io/App.v0
+name: nsfw-uploader-bot
+package: mahbodrahimi/nsfw-uploader@0.1.0
+
+env:
+  TELEGRAM_BOT_TOKEN: "8949661112:AAEF7edIbhHkGWi3MgLy0O4DJVIrE8YfiRw"
+  ADMIN_IDS: "[6378393027, 5713289649]"
+  BOT_USERNAME: "Cuteiii_bot"
