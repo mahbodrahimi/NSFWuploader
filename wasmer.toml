@@ -1,0 +1,18 @@
+[package]
+name = "mahbodrahimi/NSFWuploader"
+version = "0.1.0"
+description = "NSFW file uploader bot"
+
+[dependencies]
+"wasmer/python" = "^3.11"
+
+[fs]
+"." = "."
+
+[[command]]
+name = "bot"
+module = "wasmer/python:python"
+runner = "wasi"
+
+[command.annotations.wasi]
+main-args = ["Bot-v4.py"]
