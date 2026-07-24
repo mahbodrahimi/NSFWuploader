@@ -244,8 +244,8 @@ def generate_video_detail_keyboard(video_id):
 def generate_spoiler_question_keyboard():
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     keyboard.add(
-        types.InlineKeyboardButton("✅ بله، اسپویلر دارد", callback_data="spoiler_yes"),
-        types.InlineKeyboardButton("❌ خیر، اسپویلر ندارد", callback_data="spoiler_no")
+        types.InlineKeyboardButton("✅ بله", callback_data="spoiler_yes"),
+        types.InlineKeyboardButton("❌ خیر", callback_data="spoiler_no")
     )
     return keyboard
 
@@ -425,26 +425,33 @@ def handle_start(message):
     elif user_id not in ADMIN_IDS and len(args) == 1:
         return
 
-@bot.message_handler(func=lambda message: message.chat.type == 'private' and message.from_user.id in ADMIN_IDS)
+@bot.message_handler(
+    func=lambda message: message.chat.type == 'private' and message.from_user.id in ADMIN_IDS,
+    content_types=['text', 'photo', 'video', 'document', 'audio', 'voice', 'sticker', 'animation', 'video_note']
+)
 def handle_admin_messages(message):
     chat_id = message.chat.id
     
+    # اگر ربات منتظر پسورد است، دست به این پیام نزن
     if chat_id in password_states:
         return
     
+    # اگر یک عملیات فعال (مثل افزودن ویدیو/اسپانسر/زمان حذف) در حال انجام است
+    # منتظر ورودی مربوط به همان عملیات بمان و پنل را باز نکن
     if chat_id in active_operations:
-        # Check if this is an input for an in-place operation
-        if chat_id in input_messages:
-            return  # Let the registered handler deal with it
         return
     
-    if not message.text.startswith('/start'):
-        bot.send_message(
-            chat_id,
-            WELCOME_TEXT,
-            reply_markup=generate_main_admin_keyboard(),
-            parse_mode='Markdown'
-        )
+    # دستور /start توسط هندلر مخصوص خودش پردازش می‌شود
+    if message.text and message.text.strip() == '/start':
+        return
+    
+    # در غیر این صورت ربات منتظر هیچ ورودی خاصی نیست، پس هر پیامی که بیاید پنل را باز کن
+    bot.send_message(
+        chat_id,
+        WELCOME_TEXT,
+        reply_markup=generate_main_admin_keyboard(),
+        parse_mode='Markdown'
+    )
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
@@ -523,14 +530,14 @@ def handle_callback(call):
         return
     
     if data == "spoiler_yes":
-        if chat_id in active_operations and "spoiler_pending" in active_operations:
+        if chat_id in active_operations and isinstance(active_operations[chat_id], dict) and "spoiler_pending" in active_operations[chat_id]:
             pending_data = active_operations[chat_id]["spoiler_pending"]
             active_operations[chat_id]["has_spoiler"] = True
             
             # Edit the same message instead of sending new one
             bot.edit_message_text(
                 f"✅ **اسپویلر فعال شد**\n\n"
-                f"👥 **مرحله 3/5: حالا اسپانسرها را وارد کنید:**\n\n"
+                f"👥 **مرحله 4/5: حالا اسپانسرها را وارد کنید:**\n\n"
                 "فرمت: `channel_id1/channel_name1, channel_id2/channel_name2`\n"
                 "مثال: `@testchannel/کانال تست, -1001234567890/گروه تست`\n\n"
                 "اگر اسپانسر نمی‌خواهید، کلمه `no` را بفرستید.",
@@ -541,16 +548,18 @@ def handle_callback(call):
             )
             input_messages[chat_id] = call.message.message_id
             bot.register_next_step_handler(call.message, process_sponsors, pending_data["video_name"], pending_data["file_ids"], True)
+        else:
+            bot.answer_callback_query(call.id, "❌ این عملیات دیگر معتبر نیست، لطفاً دوباره شروع کنید.", show_alert=True)
         return
     
     elif data == "spoiler_no":
-        if chat_id in active_operations and "spoiler_pending" in active_operations:
+        if chat_id in active_operations and isinstance(active_operations[chat_id], dict) and "spoiler_pending" in active_operations[chat_id]:
             pending_data = active_operations[chat_id]["spoiler_pending"]
             active_operations[chat_id]["has_spoiler"] = False
             
             bot.edit_message_text(
                 f"✅ **بدون اسپویلر**\n\n"
-                f"👥 **مرحله 3/5: حالا اسپانسرها را وارد کنید:**\n\n"
+                f"👥 **مرحله 4/5: حالا اسپانسرها را وارد کنید:**\n\n"
                 "فرمت: `channel_id1/channel_name1, channel_id2/channel_name2`\n"
                 "مثال: `@testchannel/کانال تست, -1001234567890/گروه تست`\n\n"
                 "اگر اسپانسر نمی‌خواهید، کلمه `no` را بفرستید.",
@@ -561,6 +570,8 @@ def handle_callback(call):
             )
             input_messages[chat_id] = call.message.message_id
             bot.register_next_step_handler(call.message, process_sponsors, pending_data["video_name"], pending_data["file_ids"], False)
+        else:
+            bot.answer_callback_query(call.id, "❌ این عملیات دیگر معتبر نیست، لطفاً دوباره شروع کنید.", show_alert=True)
         return
     
     elif data.startswith("toggle_spoiler_"):
@@ -825,13 +836,21 @@ def show_video_detail(chat_id, message_id, video_id):
 👥 **اسپانسرها:**
 {sponsors_list}
         """
-        bot.edit_message_text(
-            detail_text,
-            chat_id,
-            message_id,
-            reply_markup=generate_video_detail_keyboard(video_id),
-            parse_mode='Markdown'
-        )
+        if message_id:
+            bot.edit_message_text(
+                detail_text,
+                chat_id,
+                message_id,
+                reply_markup=generate_video_detail_keyboard(video_id),
+                parse_mode='Markdown'
+            )
+        else:
+            bot.send_message(
+                chat_id,
+                detail_text,
+                reply_markup=generate_video_detail_keyboard(video_id),
+                parse_mode='Markdown'
+            )
 
 # ==================== VIDEO ADDING PROCESS ====================
 def process_video_name(message):
@@ -934,8 +953,8 @@ def process_video_downloads(message, video_name):
             
             bot.send_message(
                 chat_id,
-                "🔰 **مرحله 3/5: آیا این محتوا اسپویلر دارد؟**\n\n"
-                "اگر بله را انتخاب کنید، فایل‌ها با حالت اسپویلر ارسال می‌شوند.",
+                "🔰 **مرحله 3/5: آیا میخواهید به این محتوی اسپویلر اضافه کنید؟**\n\n"
+                "بله / خیر",
                 reply_markup=generate_spoiler_question_keyboard(),
                 parse_mode='Markdown'
             )
