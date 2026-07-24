@@ -24,15 +24,19 @@ except Exception as e:
     print(f"⚠️ Error removing webhook: {e}")
 
 # ==================== FILE PATHS ====================
+# فقط دو فایل داده روی دیسک نگهداری می‌شود:
+# 1) videos.json   → محتوای اصلی (ویدیوها/عکس‌ها، اسپانسرها، تنظیمات هر ویدیو)
+# 2) bot_data.json → همه‌ی داده‌های جانبی (کاربران، آمار بازدید/دانلود، صف حذف پیام‌ها)
 VIDEOS_FILE = "videos.json"
-SPONSORS_FILE = "sponsors.json"
-USERS_FILE = "users.json"
-STATS_FILE = "stats.json"
+BOT_DATA_FILE = "bot_data.json"
 
 # ==================== STATE MANAGEMENT ====================
 active_operations = {}
 cancelled_operations = set()
 input_messages = {}  # Track input messages for editing
+
+# قفل برای جلوگیری از تداخل چند Thread هنگام خواندن/نوشتن bot_data.json
+bot_data_lock = threading.Lock()
 
 # ==================== GLASS BUTTON STYLE ====================
 def create_glass_button(text, callback_data):
@@ -41,41 +45,68 @@ def create_glass_button(text, callback_data):
 def create_glass_button_url(text, url):
     return types.InlineKeyboardButton(f"🔗 {text}", url=url)
 
-# ==================== DATA MANAGEMENT ====================
+# ==================== DATA MANAGEMENT (videos.json) ====================
 def load_json(filename):
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             return json.load(f)
     except FileNotFoundError:
-        if filename == USERS_FILE:
-            return {"users": [], "total_views": 0}
-        elif filename == STATS_FILE:
-            return {}
-        return {} if filename == USERS_FILE else []
+        return []
 
 def save_json(filename, data):
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
+# ==================== DATA MANAGEMENT (bot_data.json) ====================
+# این فایل جایگزین users.json + stats.json + pending_deletions.json شده تا
+# تعداد فایل‌های اطلاعاتی روی سرور کمتر باشد.
+def _default_bot_data():
+    return {"users": [], "total_views": 0, "stats": {}, "pending_deletions": []}
+
+def read_bot_data():
+    """فقط خواندن bot_data.json (بدون تغییر)"""
+    with bot_data_lock:
+        try:
+            with open(BOT_DATA_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            data = {}
+        defaults = _default_bot_data()
+        for key, value in defaults.items():
+            data.setdefault(key, value)
+        return data
+
+def update_bot_data(mutator):
+    """خواندن، اعمال تغییر و ذخیره‌ی bot_data.json به‌صورت اتمیک (زیر یک قفل)"""
+    with bot_data_lock:
+        try:
+            with open(BOT_DATA_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            data = {}
+        defaults = _default_bot_data()
+        for key, value in defaults.items():
+            data.setdefault(key, value)
+        result = mutator(data)
+        with open(BOT_DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        return result
+
 # ==================== USER TRACKING ====================
 def track_user(user_id):
-    users_data = load_json(USERS_FILE)
-    if user_id not in users_data.get("users", []):
-        if "users" not in users_data:
-            users_data["users"] = []
-        users_data["users"].append(user_id)
-        save_json(USERS_FILE, users_data)
+    def mutate(data):
+        if user_id not in data["users"]:
+            data["users"].append(user_id)
+    update_bot_data(mutate)
 
 def increment_view_count(video_id):
-    users_data = load_json(USERS_FILE)
-    users_data["total_views"] = users_data.get("total_views", 0) + 1
-    save_json(USERS_FILE, users_data)
-    
-    stats = load_json(STATS_FILE)
-    if video_id not in stats:
-        stats[video_id] = {"downloads": 0, "added_date": datetime.now().isoformat()}
-    stats[video_id]["downloads"] = stats[video_id].get("downloads", 0) + 1
-    save_json(STATS_FILE, stats)
+    def mutate(data):
+        data["total_views"] = data.get("total_views", 0) + 1
+        stats = data["stats"]
+        if video_id not in stats:
+            stats[video_id] = {"downloads": 0, "added_date": datetime.now().isoformat()}
+        stats[video_id]["downloads"] = stats[video_id].get("downloads", 0) + 1
+    update_bot_data(mutate)
 
 # ==================== VIDEO MANAGEMENT ====================
 def add_video(name, file_ids, sponsors, delete_time, has_spoiler=False):
@@ -96,10 +127,10 @@ def add_video(name, file_ids, sponsors, delete_time, has_spoiler=False):
     save_json(VIDEOS_FILE, videos)
     
     # Initialize stats for this video
-    stats = load_json(STATS_FILE)
-    if video_id not in stats:
-        stats[video_id] = {"downloads": 0, "added_date": video_data["added_date"]}
-        save_json(STATS_FILE, stats)
+    def mutate(data):
+        if video_id not in data["stats"]:
+            data["stats"][video_id] = {"downloads": 0, "added_date": video_data["added_date"]}
+    update_bot_data(mutate)
     
     return video_id
 
@@ -132,14 +163,45 @@ def delete_video(video_id):
     save_json(VIDEOS_FILE, videos)
 
 def delete_all_videos():
-    """Delete all videos and clear stats"""
+    """Delete all videos and clear per-video stats"""
     save_json(VIDEOS_FILE, [])
-    save_json(STATS_FILE, {})
+    def mutate(data):
+        data["stats"] = {}
+    update_bot_data(mutate)
 
 def clear_all_stats():
-    """Clear all statistics"""
-    save_json(USERS_FILE, {"users": [], "total_views": 0})
-    save_json(STATS_FILE, {})
+    """Clear all statistics (users, total views, per-video downloads)"""
+    def mutate(data):
+        data["users"] = []
+        data["total_views"] = 0
+        data["stats"] = {}
+    update_bot_data(mutate)
+
+# ==================== PERSISTENT MESSAGE DELETION QUEUE ====================
+# زمان‌بندی حذف پیام‌ها هم داخل همان bot_data.json نگهداری می‌شود تا حتی با
+# ری‌استارت شدن بات، پیام‌های ارسال‌شده به کاربر سر وقت حذف شوند.
+def add_pending_deletion(chat_id, message_ids, video_id, delete_at):
+    """یک زمان‌بندی حذف پیام را ذخیره می‌کند تا در صورت ری‌استارت بات از بین نرود"""
+    entry_id = f"{chat_id}_{int(time.time()*1000)}"
+    def mutate(data):
+        data["pending_deletions"].append({
+            "id": entry_id,
+            "chat_id": chat_id,
+            "message_ids": message_ids,
+            "video_id": video_id,
+            "delete_at": delete_at
+        })
+    update_bot_data(mutate)
+    return entry_id
+
+def remove_pending_deletion(entry_id):
+    """پس از حذف موفق پیام‌ها، رکورد مربوطه را پاک می‌کند"""
+    def mutate(data):
+        data["pending_deletions"] = [e for e in data["pending_deletions"] if e.get("id") != entry_id]
+    update_bot_data(mutate)
+
+def load_all_pending_deletions():
+    return read_bot_data().get("pending_deletions", [])
 
 # ==================== SPONSOR MANAGEMENT ====================
 def add_sponsor(video_id, channel_id, channel_name):
@@ -1145,12 +1207,12 @@ def process_delete_time(message, video_id):
 
 # ==================== STATS & INFO FUNCTIONS ====================
 def show_stats(chat_id, message_id=None):
-    users_data = load_json(USERS_FILE)
-    stats = load_json(STATS_FILE)
+    bot_data = read_bot_data()
+    stats = bot_data.get("stats", {})
     videos = load_json(VIDEOS_FILE)
     
-    total_users = len(users_data.get("users", []))
-    total_views = users_data.get("total_views", 0)
+    total_users = len(bot_data.get("users", []))
+    total_views = bot_data.get("total_views", 0)
     
     video_stats = []
     for video_id, stat_data in stats.items():
@@ -1200,7 +1262,7 @@ def show_stats(chat_id, message_id=None):
 
 def show_video_info(chat_id, message_id, video_id):
     video = get_video(video_id)
-    stats = load_json(STATS_FILE)
+    stats = read_bot_data().get("stats", {})
     
     if not video:
         return
@@ -1299,22 +1361,24 @@ def send_video_to_user(chat_id, video, user_id):
             parse_mode='Markdown'
         )
         
-        # Schedule deletion
+        # Schedule deletion - زمان دقیق حذف در bot_data.json ذخیره می‌شود تا با
+        # ری‌استارت شدن بات هم گم نشود
         delete_after = video["delete_time"]
-        threading.Thread(target=schedule_delete_multiple, args=(chat_id, video_messages, video, delete_after)).start()
+        delete_at = time.time() + delete_after
+        entry_id = add_pending_deletion(chat_id, video_messages, video["id"], delete_at)
+        threading.Thread(target=schedule_delete_multiple, args=(entry_id, chat_id, video_messages, video["id"], delete_at)).start()
         
     except Exception as e:
         bot.send_message(chat_id, "❌ خطا در ارسال فایل! لطفاً دوباره تلاش کنید.")
         print(f"Error sending video: {e}")
 
-def schedule_delete_multiple(chat_id, message_ids, video, delay):
-    """حذف چند فایل بعد از زمان مشخص شده"""
-    time.sleep(delay)
+def schedule_delete_multiple(entry_id, chat_id, message_ids, video_id, delete_at):
+    """حذف چند پیام دقیقاً در زمان مشخص‌شده (delete_at یک timestamp مطلق است).
+    این تابع هم برای ارسال تازه و هم برای بازیابی بعد از ری‌استارت بات استفاده می‌شود."""
+    remaining = delete_at - time.time()
+    if remaining > 0:
+        time.sleep(remaining)
     try:
-        video_check = get_video(video["id"])
-        if not video_check:
-            return
-        
         for msg_id in message_ids:
             try:
                 bot.delete_message(chat_id, msg_id)
@@ -1322,18 +1386,39 @@ def schedule_delete_multiple(chat_id, message_ids, video, delay):
             except Exception as e:
                 print(f"Error deleting message {msg_id}: {e}")
         
+        video = get_video(video_id)
         keyboard = types.InlineKeyboardMarkup()
-        keyboard.add(create_glass_button("🔄 دانلود مجدد", f"check_sponsors_{video['id']}"))
+        if video:
+            keyboard.add(create_glass_button("🔄 دانلود مجدد", f"check_sponsors_{video_id}"))
         
-        bot.send_message(
-            chat_id,
-            f"⏰ **فایل‌ها حذف شدند.**\nبرای دانلود مجدد، روی دکمه زیر کلیک کنید.",
-            reply_markup=keyboard,
-            parse_mode='Markdown'
-        )
+        try:
+            bot.send_message(
+                chat_id,
+                "⏰ **فایل‌ها حذف شدند.**\nبرای دانلود مجدد، روی دکمه زیر کلیک کنید.",
+                reply_markup=keyboard if video else None,
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            print(f"Error sending deletion notice: {e}")
     except Exception as e:
         print(f"Error in schedule delete: {e}")
+    finally:
+        # چه موفق چه ناموفق، رکورد از صف حذف می‌شود تا در استارت بعدی دوباره اجرا نشود
+        remove_pending_deletion(entry_id)
+
+def resume_pending_deletions():
+    """در زمان روشن شدن بات، تمام حذف‌های زمان‌بندی‌شده‌ی نیمه‌کاره (مثلاً به‌خاطر
+    ری‌استارت شدن بات) را دوباره در Threadهای جدید اجرا می‌کند تا حتماً انجام شوند."""
+    entries = load_all_pending_deletions()
+    for entry in entries:
+        threading.Thread(
+            target=schedule_delete_multiple,
+            args=(entry["id"], entry["chat_id"], entry["message_ids"], entry["video_id"], entry["delete_at"])
+        ).start()
+    if entries:
+        print(f"🔁 {len(entries)} حذف زمان‌بندی‌شده‌ی نیمه‌کاره بازیابی شد.")
 
 # ==================== BOT START ====================
+resume_pending_deletions()
 print("🤖 Bot is running...")
 bot.infinity_polling()
