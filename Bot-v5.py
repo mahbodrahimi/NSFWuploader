@@ -191,8 +191,10 @@ def generate_video_list_keyboard(page=0, per_page=10):
     page_videos = videos[start:end]
     
     for video in page_videos:
+        # Show video ID instead of name for privacy
+        display_text = f"🎬 ویدیو {video['id']}"
         keyboard.add(
-            create_glass_button(f"🎬 {video['name']}", f"video_detail_{video['id']}")
+            create_glass_button(display_text, f"video_detail_{video['id']}")
         )
     
     nav_buttons = []
@@ -263,6 +265,11 @@ def generate_back_keyboard(callback_data):
     keyboard.add(create_glass_button("🔙 بازگشت", callback_data))
     return keyboard
 
+def generate_cancel_keyboard():
+    keyboard = types.InlineKeyboardMarkup(row_width=1)
+    keyboard.add(create_glass_button("❌ کنسل", "cancel_password"))
+    return keyboard
+
 # ==================== PASSWORD HANDLING ====================
 # Dictionary to store password verification states
 password_states = {}
@@ -275,8 +282,8 @@ def request_password(chat_id, action_type):
     }
     msg = bot.send_message(
         chat_id,
-        "🔐 **لطفاً پسورد ادمین را وارد کنید:**\n\n"
-        "برای لغو، کلمه `cancel` را بفرستید.",
+        "🔐 **لطفاً پسورد ادمین را وارد کنید:**",
+        reply_markup=generate_cancel_keyboard(),
         parse_mode='Markdown'
     )
     bot.register_next_step_handler(msg, verify_password)
@@ -285,24 +292,7 @@ def verify_password(message):
     """Verify the entered password"""
     chat_id = message.chat.id
     
-    if message.text and message.text.lower() == 'cancel':
-        if chat_id in password_states:
-            del password_states[chat_id]
-        bot.send_message(
-            chat_id,
-            "❌ **عملیات لغو شد**",
-            parse_mode='Markdown'
-        )
-        bot.send_message(
-            chat_id,
-            "🌟 **پنل مدیریت بات**",
-            reply_markup=generate_main_admin_keyboard(),
-            parse_mode='Markdown'
-        )
-        return
-    
     if chat_id not in password_states:
-        bot.send_message(chat_id, "❌ درخواست منقضی شده است. لطفاً دوباره تلاش کنید.")
         return
     
     # Check if password request is expired (5 minutes)
@@ -323,7 +313,8 @@ def verify_password(message):
         bot.send_message(
             chat_id,
             "❌ **پسورد اشتباه است!**\n\n"
-            "لطفاً دوباره تلاش کنید یا `cancel` را بفرستید.",
+            "لطفاً دوباره تلاش کنید یا دکمه کنسل را بزنید.",
+            reply_markup=generate_cancel_keyboard(),
             parse_mode='Markdown'
         )
         bot.register_next_step_handler(message, verify_password)
@@ -423,6 +414,28 @@ def handle_callback(call):
     user_id = call.from_user.id
     data = call.data
     
+    # Cancel password operation
+    if data == "cancel_password":
+        if call.message.chat.id in password_states:
+            del password_states[call.message.chat.id]
+        try:
+            bot.clear_step_handler_by_chat_id(call.message.chat.id)
+        except:
+            pass
+        bot.edit_message_text(
+            "❌ **عملیات لغو شد**",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode='Markdown'
+        )
+        bot.send_message(
+            call.message.chat.id,
+            "🌟 **پنل مدیریت بات**",
+            reply_markup=generate_main_admin_keyboard(),
+            parse_mode='Markdown'
+        )
+        return
+    
     # Back operation
     if data == "cancel_operation":
         try:
@@ -455,7 +468,7 @@ def handle_callback(call):
     if data == "admin_add_video":
         msg = bot.send_message(
             call.message.chat.id,
-            "📝 **مرحله 1/4: لطفاً نام ویدیو را وارد کنید:**\n(این نام فقط برای مدیریت نمایش داده می‌شود)",
+            "📝 **مرحله 1/4: لطفاً نام ویدیو را وارد کنید:**\n(این نام فقط برای مدیریت نمایش داده می‌شود و به کاربران نشان داده نمی‌شود)",
             reply_markup=generate_back_keyboard("admin_back"),
             parse_mode='Markdown'
         )
@@ -733,7 +746,7 @@ def process_video_downloads(message, video_name):
                                 f.write(chunk)
                         
                         with open(temp_file, 'rb') as video_file:
-                            msg = bot.send_video(message.chat.id, video_file, caption=f"📹 ویدیو {i+1}/{len(urls)}: {video_name}")
+                            msg = bot.send_video(message.chat.id, video_file, caption=f"📹 ویدیو {i+1}/{len(urls)}")
                             file_id = msg.video.file_id
                         
                         os.remove(temp_file)
@@ -922,7 +935,8 @@ def show_stats(chat_id, message_id=None):
     
     if top_10:
         for i, v_stat in enumerate(top_10, 1):
-            stats_text += f"{i}. {v_stat['name']}: {v_stat['downloads']} دانلود\n"
+            # Show video ID instead of name for privacy
+            stats_text += f"{i}. ویدیو {v_stat['video_id']}: {v_stat['downloads']} دانلود\n"
     else:
         stats_text += "هنوز ویدیویی ثبت نشده است\n"
     
@@ -999,14 +1013,15 @@ def send_video_to_user(chat_id, video, user_id):
         if not file_ids and "file_id" in video:
             file_ids = [video["file_id"]]
         
-        # Send all videos
+        # Send all videos without showing video name
         video_messages = []
         for i, file_id in enumerate(file_ids):
             try:
-                if i == 0:
-                    caption = f"📹 {video['name']}"
+                # Don't include video name in caption for users
+                if len(file_ids) > 1:
+                    caption = f"📹 ویدیو {i+1}/{len(file_ids)}"
                 else:
-                    caption = f"📹 {video['name']} - قسمت {i+1}"
+                    caption = None
                 
                 video_msg = bot.send_video(
                     chat_id,
