@@ -12,6 +12,7 @@ import re
 TOKEN = "8949661112:AAEF7edIbhHkGWi3MgLy0O4DJVIrE8YfiRw"
 ADMIN_IDS = [6378393027, 5713289649]
 BOT_USERNAME = "Cuteiii_bot"
+ADMIN_PASSWORD = "admin"  # قابل تنظیم - پسورد برای حذف آمار و ویدیوها
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -72,16 +73,18 @@ def increment_view_count(video_id):
     save_json(STATS_FILE, stats)
 
 # ==================== VIDEO MANAGEMENT ====================
-def add_video(name, file_id, sponsors, delete_time):
+def add_video(name, file_ids, sponsors, delete_time):
+    """Add a video with multiple file_ids (multiple videos for one share link)"""
     videos = load_json(VIDEOS_FILE)
     video_id = str(int(time.time()))
     video_data = {
         "id": video_id,
         "name": name,
-        "file_id": file_id,
+        "file_ids": file_ids if isinstance(file_ids, list) else [file_ids],
         "sponsors": sponsors,
         "delete_time": delete_time,
-        "added_date": datetime.now().isoformat()
+        "added_date": datetime.now().isoformat(),
+        "current_index": 0
     }
     videos.append(video_data)
     save_json(VIDEOS_FILE, videos)
@@ -94,23 +97,15 @@ def add_video(name, file_id, sponsors, delete_time):
     
     return video_id
 
-def add_multiple_videos(video_data_list):
-    """Add multiple videos at once"""
-    video_ids = []
-    for video_data in video_data_list:
-        video_id = add_video(
-            video_data["name"],
-            video_data["file_id"],
-            video_data["sponsors"],
-            video_data["delete_time"]
-        )
-        video_ids.append(video_id)
-    return video_ids
-
 def get_video(video_id):
     videos = load_json(VIDEOS_FILE)
     for video in videos:
         if video["id"] == video_id:
+            if "file_id" in video and "file_ids" not in video:
+                video["file_ids"] = [video["file_id"]]
+                del video["file_id"]
+            if "current_index" not in video:
+                video["current_index"] = 0
             return video
     return None
 
@@ -127,6 +122,16 @@ def delete_video(video_id):
     videos = load_json(VIDEOS_FILE)
     videos = [v for v in videos if v["id"] != video_id]
     save_json(VIDEOS_FILE, videos)
+
+def delete_all_videos():
+    """Delete all videos and clear stats"""
+    save_json(VIDEOS_FILE, [])
+    save_json(STATS_FILE, {})
+
+def clear_all_stats():
+    """Clear all statistics"""
+    save_json(USERS_FILE, {"users": [], "total_views": 0})
+    save_json(STATS_FILE, {})
 
 # ==================== SPONSOR MANAGEMENT ====================
 def add_sponsor(video_id, channel_id, channel_name):
@@ -199,6 +204,7 @@ def generate_video_list_keyboard(page=0, per_page=10):
     if nav_buttons:
         keyboard.row(*nav_buttons)
     
+    keyboard.add(create_glass_button("🗑️ حذف همه ویدیوها", "confirm_delete_all_videos"))
     keyboard.add(create_glass_button("🔙 بازگشت", "admin_back"))
     return keyboard
 
@@ -224,6 +230,7 @@ def generate_video_info_keyboard(video_id):
 def generate_stats_keyboard():
     keyboard = types.InlineKeyboardMarkup(row_width=1)
     keyboard.add(
+        create_glass_button("🗑️ پاک کردن آمار", "confirm_clear_stats"),
         create_glass_button("🔙 بازگشت", "admin_back")
     )
     return keyboard
@@ -251,10 +258,105 @@ def generate_sponsor_check_keyboard(video_id, user_id):
     
     return keyboard
 
-def generate_cancel_keyboard():
+def generate_back_keyboard(callback_data):
     keyboard = types.InlineKeyboardMarkup(row_width=1)
-    keyboard.add(create_glass_button("❌ کنسل", "cancel_operation"))
+    keyboard.add(create_glass_button("🔙 بازگشت", callback_data))
     return keyboard
+
+# ==================== PASSWORD HANDLING ====================
+# Dictionary to store password verification states
+password_states = {}
+
+def request_password(chat_id, action_type):
+    """Request password from admin"""
+    password_states[chat_id] = {
+        "action": action_type,
+        "timestamp": time.time()
+    }
+    msg = bot.send_message(
+        chat_id,
+        "🔐 **لطفاً پسورد ادمین را وارد کنید:**\n\n"
+        "برای لغو، کلمه `cancel` را بفرستید.",
+        parse_mode='Markdown'
+    )
+    bot.register_next_step_handler(msg, verify_password)
+
+def verify_password(message):
+    """Verify the entered password"""
+    chat_id = message.chat.id
+    
+    if message.text and message.text.lower() == 'cancel':
+        if chat_id in password_states:
+            del password_states[chat_id]
+        bot.send_message(
+            chat_id,
+            "❌ **عملیات لغو شد**",
+            parse_mode='Markdown'
+        )
+        bot.send_message(
+            chat_id,
+            "🌟 **پنل مدیریت بات**",
+            reply_markup=generate_main_admin_keyboard(),
+            parse_mode='Markdown'
+        )
+        return
+    
+    if chat_id not in password_states:
+        bot.send_message(chat_id, "❌ درخواست منقضی شده است. لطفاً دوباره تلاش کنید.")
+        return
+    
+    # Check if password request is expired (5 minutes)
+    if time.time() - password_states[chat_id]["timestamp"] > 300:
+        del password_states[chat_id]
+        bot.send_message(chat_id, "❌ زمان درخواست منقضی شده است. لطفاً دوباره تلاش کنید.")
+        return
+    
+    if message.text and message.text.strip() == ADMIN_PASSWORD:
+        action = password_states[chat_id]["action"]
+        del password_states[chat_id]
+        
+        if action == "clear_stats":
+            execute_clear_stats(chat_id)
+        elif action == "delete_all_videos":
+            execute_delete_all_videos(chat_id)
+    else:
+        bot.send_message(
+            chat_id,
+            "❌ **پسورد اشتباه است!**\n\n"
+            "لطفاً دوباره تلاش کنید یا `cancel` را بفرستید.",
+            parse_mode='Markdown'
+        )
+        bot.register_next_step_handler(message, verify_password)
+
+def execute_clear_stats(chat_id):
+    """Execute the clear stats action"""
+    clear_all_stats()
+    bot.send_message(
+        chat_id,
+        "✅ **تمام آمار با موفقیت پاک شد!**",
+        parse_mode='Markdown'
+    )
+    bot.send_message(
+        chat_id,
+        "🌟 **پنل مدیریت بات**",
+        reply_markup=generate_main_admin_keyboard(),
+        parse_mode='Markdown'
+    )
+
+def execute_delete_all_videos(chat_id):
+    """Execute the delete all videos action"""
+    delete_all_videos()
+    bot.send_message(
+        chat_id,
+        "✅ **تمام ویدیوها با موفقیت حذف شدند!**",
+        parse_mode='Markdown'
+    )
+    bot.send_message(
+        chat_id,
+        "🌟 **پنل مدیریت بات**",
+        reply_markup=generate_main_admin_keyboard(),
+        parse_mode='Markdown'
+    )
 
 # ==================== MESSAGE HANDLERS ====================
 @bot.message_handler(commands=['start'])
@@ -306,6 +408,9 @@ def handle_start(message):
 def handle_admin_messages(message):
     """هر پیامی در پیوی برای ادمین‌ها پنل رو بفرسته"""
     if not message.text.startswith('/start'):
+        # Check if admin is in password verification mode
+        if message.chat.id in password_states:
+            return  # Let the password handler deal with it
         bot.send_message(
             message.chat.id,
             "🌟 **پنل مدیریت بات**",
@@ -318,11 +423,17 @@ def handle_callback(call):
     user_id = call.from_user.id
     data = call.data
     
-    # Cancel operation
+    # Back operation
     if data == "cancel_operation":
-        bot.clear_step_handler_by_chat_id(call.message.chat.id)
+        try:
+            bot.clear_step_handler_by_chat_id(call.message.chat.id)
+        except:
+            pass
+        # Clear any password states
+        if call.message.chat.id in password_states:
+            del password_states[call.message.chat.id]
         bot.edit_message_text(
-            "❌ **عملیات کنسل شد**",
+            "🔙 **بازگشت به منوی اصلی**",
             call.message.chat.id,
             call.message.message_id,
             parse_mode='Markdown'
@@ -335,7 +446,7 @@ def handle_callback(call):
         )
         return
     
-    if data.startswith('admin_') or data.startswith('video_') or data.startswith('manage_') or data.startswith('set_delete_') or data.startswith('confirm_delete_') or data.startswith('get_share_') or data.startswith('video_info_'):
+    if data.startswith('admin_') or data.startswith('video_') or data.startswith('manage_') or data.startswith('set_delete_') or data.startswith('confirm_delete_') or data.startswith('get_share_') or data.startswith('video_info_') or data.startswith('confirm_clear_stats') or data.startswith('confirm_delete_all'):
         if user_id not in ADMIN_IDS:
             bot.answer_callback_query(call.id, "⛔ شما دسترسی ادمین ندارید!")
             return
@@ -344,13 +455,11 @@ def handle_callback(call):
     if data == "admin_add_video":
         msg = bot.send_message(
             call.message.chat.id,
-            "📝 **مرحله 1/4: لطفاً نام ویدیوها را وارد کنید:**\n(این نام فقط برای مدیریت نمایش داده می‌شود)\n\n"
-            "برای چند ویدیو با کاما جدا کنید:\n"
-            "مثال: `Video1, Video2, Video3`",
-            reply_markup=generate_cancel_keyboard(),
+            "📝 **مرحله 1/4: لطفاً نام ویدیو را وارد کنید:**\n(این نام فقط برای مدیریت نمایش داده می‌شود)",
+            reply_markup=generate_back_keyboard("admin_back"),
             parse_mode='Markdown'
         )
-        bot.register_next_step_handler(msg, process_video_names)
+        bot.register_next_step_handler(msg, process_video_name)
     
     elif data == "admin_list_videos":
         videos = load_json(VIDEOS_FILE)
@@ -364,7 +473,7 @@ def handle_callback(call):
             )
         else:
             bot.edit_message_text(
-                "📋 **لیست ویدیوها:**",
+                f"📋 **لیست ویدیوها ({len(videos)} عدد):**",
                 call.message.chat.id,
                 call.message.message_id,
                 reply_markup=generate_video_list_keyboard(),
@@ -374,10 +483,53 @@ def handle_callback(call):
     elif data == "admin_stats":
         show_stats(call.message.chat.id, call.message.message_id)
     
+    elif data == "confirm_clear_stats":
+        # Show confirmation with password request
+        keyboard = types.InlineKeyboardMarkup(row_width=2)
+        keyboard.add(
+            create_glass_button("✅ بله، پاک کن", "request_clear_stats_password"),
+            create_glass_button("❌ خیر", "admin_stats")
+        )
+        bot.edit_message_text(
+            "⚠️ **آیا از پاک کردن تمام آمار اطمینان دارید؟**\n\n"
+            "این عمل قابل بازگشت نیست!\n"
+            "تمام آمار کاربران و دانلودها پاک خواهد شد.",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+    
+    elif data == "request_clear_stats_password":
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        request_password(call.message.chat.id, "clear_stats")
+    
+    elif data == "confirm_delete_all_videos":
+        # Show confirmation with password request
+        keyboard = types.InlineKeyboardMarkup(row_width=2)
+        keyboard.add(
+            create_glass_button("✅ بله، حذف کن", "request_delete_all_password"),
+            create_glass_button("❌ خیر", "admin_list_videos")
+        )
+        bot.edit_message_text(
+            "⚠️ **آیا از حذف تمام ویدیوها اطمینان دارید؟**\n\n"
+            "این عمل قابل بازگشت نیست!\n"
+            "تمام ویدیوها و اطلاعات آن‌ها حذف خواهد شد.",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+    
+    elif data == "request_delete_all_password":
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        request_password(call.message.chat.id, "delete_all_videos")
+    
     elif data.startswith("video_page_"):
         page = int(data.split("_")[2])
+        videos = load_json(VIDEOS_FILE)
         bot.edit_message_text(
-            "📋 **لیست ویدیوها:**",
+            f"📋 **لیست ویدیوها ({len(videos)} عدد):**",
             call.message.chat.id,
             call.message.message_id,
             reply_markup=generate_video_list_keyboard(page),
@@ -390,11 +542,15 @@ def handle_callback(call):
         if video:
             sponsors_list = "\n".join([f"• {s['channel_name']} (`{s['channel_id']}`)" for s in video['sponsors']]) if video['sponsors'] else "هیچ اسپانسری ثبت نشده"
             
+            file_ids = video.get('file_ids', [video.get('file_id')] if 'file_id' in video else [])
+            video_count = len(file_ids)
+            
             detail_text = f"""
 🎬 **جزئیات ویدیو**
 
 📝 **نام:** {video['name']}
 🆔 **شناسه:** `{video['id']}`
+📹 **تعداد ویدیوها:** {video_count}
 ⏱️ **زمان حذف:** {video['delete_time']} ثانیه
 
 👥 **اسپانسرها:**
@@ -426,7 +582,7 @@ def handle_callback(call):
             "مثال: `@testchannel/کانال تست, -1001234567890/گروه تست`\n\n"
             "از / برای جدا کردن آیدی و نام استفاده کنید\n"
             "از , برای جدا کردن اسپانسرهای مختلف استفاده کنید",
-            reply_markup=generate_cancel_keyboard(),
+            reply_markup=generate_back_keyboard(f"video_detail_{video_id}"),
             parse_mode='Markdown'
         )
         bot.register_next_step_handler(msg, process_add_sponsor, video_id)
@@ -437,7 +593,7 @@ def handle_callback(call):
             call.message.chat.id,
             "⏱️ **لطفاً زمان حذف خودکار را به ثانیه وارد کنید:**\n"
             "مثال: 300 برای 5 دقیقه",
-            reply_markup=generate_cancel_keyboard(),
+            reply_markup=generate_back_keyboard(f"video_detail_{video_id}"),
             parse_mode='Markdown'
         )
         bot.register_next_step_handler(msg, process_delete_time, video_id)
@@ -491,7 +647,6 @@ def handle_callback(call):
     elif data.startswith("check_sponsors_"):
         video_id = data.replace("check_sponsors_", "")
         
-        # بررسی وجود ویدیو
         video = get_video(video_id)
         if not video:
             bot.answer_callback_query(call.id, "❌ ویدیوی مورد نظر وجود ندارد", show_alert=True)
@@ -517,7 +672,6 @@ def handle_callback(call):
     elif data.startswith("verify_membership_"):
         video_id = data.replace("verify_membership_", "")
         
-        # بررسی وجود ویدیو
         video = get_video(video_id)
         if not video:
             bot.answer_callback_query(call.id, "❌ ویدیوی مورد نظر وجود ندارد", show_alert=True)
@@ -534,42 +688,39 @@ def handle_callback(call):
             bot.answer_callback_query(call.id, "❌ هنوز در همه کانال‌ها عضو نیستید!")
 
 # ==================== VIDEO ADDING PROCESS ====================
-def process_video_names(message):
+def process_video_name(message):
     if message.text and message.text.strip():
-        names = [name.strip() for name in message.text.strip().split(',') if name.strip()]
-        if not names:
-            bot.send_message(message.chat.id, "❌ نام نامعتبر! لطفاً دوباره تلاش کنید.", reply_markup=generate_cancel_keyboard())
-            bot.register_next_step_handler(message, process_video_names)
-            return
-        
+        name = message.text.strip()
         msg = bot.send_message(
             message.chat.id,
-            f"✅ **تعداد {len(names)} ویدیو ثبت شد**\n\n"
-            f"📹 **مرحله 2/4: حالا لینک‌های دانلود مستقیم ویدیوها را ارسال کنید:**\n\n"
-            "با کاما جدا کنید (به ترتیب نام‌ها):\n"
+            f"✅ **نام ویدیو ثبت شد:** `{name}`\n\n"
+            f"📹 **مرحله 2/4: حالا لینک‌های دانلود مستقیم ویدیو را ارسال کنید:**\n\n"
+            "می‌توانید چند لینک با کاما جدا کنید:\n"
             "مثال: `http://link1.mp4, http://link2.mp4, http://link3.mp4`\n\n"
-            f"**نام‌ها:** {', '.join(names)}",
-            reply_markup=generate_cancel_keyboard(),
+            "همه لینک‌ها تحت یک نام و یک لینک اشتراک قرار می‌گیرند.",
+            reply_markup=generate_back_keyboard("admin_back"),
             parse_mode='Markdown'
         )
-        bot.register_next_step_handler(msg, process_video_downloads, names)
+        bot.register_next_step_handler(msg, process_video_downloads, name)
     else:
-        bot.send_message(message.chat.id, "❌ نام نامعتبر! لطفاً دوباره تلاش کنید.", reply_markup=generate_cancel_keyboard())
-        bot.register_next_step_handler(message, process_video_names)
+        bot.send_message(message.chat.id, "❌ نام نامعتبر! لطفاً دوباره تلاش کنید.", reply_markup=generate_back_keyboard("admin_back"))
+        bot.register_next_step_handler(message, process_video_name)
 
-def process_video_downloads(message, video_names):
+def process_video_downloads(message, video_name):
     try:
         if message.text and message.text.strip():
             urls = [url.strip() for url in message.text.strip().split(',') if url.strip()]
             
-            if len(urls) != len(video_names):
-                bot.send_message(
-                    message.chat.id,
-                    f"❌ تعداد لینک‌ها ({len(urls)}) با تعداد نام‌ها ({len(video_names)}) مطابقت ندارد!",
-                    reply_markup=generate_cancel_keyboard()
-                )
-                bot.register_next_step_handler(message, process_video_downloads, video_names)
+            if not urls:
+                bot.send_message(message.chat.id, "❌ لینک نامعتبر! لطفاً دوباره تلاش کنید.", reply_markup=generate_back_keyboard("admin_back"))
+                bot.register_next_step_handler(message, process_video_downloads, video_name)
                 return
+            
+            bot.send_message(
+                message.chat.id,
+                f"⏳ **در حال دانلود {len(urls)} ویدیو... لطفاً صبر کنید**",
+                parse_mode='Markdown'
+            )
             
             file_ids = []
             for i, url in enumerate(urls):
@@ -582,7 +733,7 @@ def process_video_downloads(message, video_names):
                                 f.write(chunk)
                         
                         with open(temp_file, 'rb') as video_file:
-                            msg = bot.send_video(message.chat.id, video_file, caption=f"📹 ویدیو {i+1}: {video_names[i]}")
+                            msg = bot.send_video(message.chat.id, video_file, caption=f"📹 ویدیو {i+1}/{len(urls)}: {video_name}")
                             file_id = msg.video.file_id
                         
                         os.remove(temp_file)
@@ -601,19 +752,18 @@ def process_video_downloads(message, video_names):
                 f"👥 **مرحله 3/4: حالا اسپانسرها را وارد کنید:**\n\n"
                 "فرمت: `channel_id1/channel_name1, channel_id2/channel_name2`\n"
                 "مثال: `@testchannel/کانال تست, -1001234567890/گروه تست`\n\n"
-                "اگر اسپانسر نمی‌خواهید، کلمه `no` را بفرستید.\n"
-                "همه ویدیوها اسپانسرهای یکسانی خواهند داشت.",
-                reply_markup=generate_cancel_keyboard(),
+                "اگر اسپانسر نمی‌خواهید، کلمه `no` را بفرستید.",
+                reply_markup=generate_back_keyboard("admin_back"),
                 parse_mode='Markdown'
             )
-            bot.register_next_step_handler(msg, process_sponsors_multiple, video_names, file_ids)
+            bot.register_next_step_handler(msg, process_sponsors, video_name, file_ids)
         else:
-            bot.send_message(message.chat.id, "❌ لینک نامعتبر! لطفاً دوباره تلاش کنید.", reply_markup=generate_cancel_keyboard())
-            bot.register_next_step_handler(message, process_video_downloads, video_names)
+            bot.send_message(message.chat.id, "❌ لینک نامعتبر! لطفاً دوباره تلاش کنید.", reply_markup=generate_back_keyboard("admin_back"))
+            bot.register_next_step_handler(message, process_video_downloads, video_name)
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ خطا: {str(e)}")
 
-def process_sponsors_multiple(message, video_names, file_ids):
+def process_sponsors(message, video_name, file_ids):
     try:
         sponsors = []
         
@@ -637,40 +787,36 @@ def process_sponsors_multiple(message, video_names, file_ids):
             message.chat.id,
             f"✅ **اسپانسرها ثبت شدند:**\n{sponsors_text}\n\n"
             f"⏱️ **مرحله 4/4: زمان حذف خودکار را به ثانیه وارد کنید:**\n"
-            "مثال: 300 برای 5 دقیقه\n"
-            "همه ویدیوها زمان حذف یکسانی خواهند داشت.",
-            reply_markup=generate_cancel_keyboard(),
+            "مثال: 300 برای 5 دقیقه",
+            reply_markup=generate_back_keyboard("admin_back"),
             parse_mode='Markdown'
         )
-        bot.register_next_step_handler(msg, process_final_delete_time_multiple, video_names, file_ids, sponsors)
+        bot.register_next_step_handler(msg, process_final_delete_time, video_name, file_ids, sponsors)
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ خطا در پردازش اسپانسرها: {str(e)}")
 
-def process_final_delete_time_multiple(message, video_names, file_ids, sponsors):
+def process_final_delete_time(message, video_name, file_ids, sponsors):
     try:
         delete_time = int(message.text.strip())
         if delete_time <= 0:
             bot.send_message(message.chat.id, "❌ زمان باید بیشتر از 0 باشد!")
             return
         
-        video_ids = []
-        for i in range(len(video_names)):
-            video_id = add_video(video_names[i], file_ids[i], sponsors.copy(), delete_time)
-            video_ids.append(video_id)
+        video_id = add_video(video_name, file_ids, sponsors.copy(), delete_time)
         
-        share_links = []
-        for i, video_id in enumerate(video_ids):
-            share_link = f"https://t.me/{BOT_USERNAME}?start=video_{video_id}"
-            share_links.append(f"**{video_names[i]}:** `{share_link}`")
+        share_link = f"https://t.me/{BOT_USERNAME}?start=video_{video_id}"
         
         sponsors_list = "\n".join([f"• {s['channel_name']} (`{s['channel_id']}`)" for s in sponsors]) if sponsors else "بدون اسپانسر"
         
         bot.send_message(
             message.chat.id,
-            f"✅ **{len(video_ids)} ویدیو با موفقیت اضافه شدند!**\n\n"
+            f"✅ **ویدیو با موفقیت اضافه شد!**\n\n"
+            f"📝 **نام:** `{video_name}`\n"
+            f"🆔 **شناسه:** `{video_id}`\n"
+            f"📹 **تعداد ویدیوها:** {len(file_ids)}\n"
             f"⏱️ **زمان حذف:** {delete_time} ثانیه\n"
             f"👥 **اسپانسرها:**\n{sponsors_list}\n\n"
-            f"🔗 **لینک‌های اشتراک:**\n" + "\n".join(share_links),
+            f"🔗 **لینک اشتراک:**\n`{share_link}`",
             parse_mode='Markdown'
         )
         
@@ -683,7 +829,7 @@ def process_final_delete_time_multiple(message, video_names, file_ids, sponsors)
         
     except ValueError:
         bot.send_message(message.chat.id, "❌ لطفاً یک عدد معتبر وارد کنید!")
-        bot.register_next_step_handler(message, process_final_delete_time_multiple, video_names, file_ids, sponsors)
+        bot.register_next_step_handler(message, process_final_delete_time, video_name, file_ids, sponsors)
 
 def process_add_sponsor(message, video_id):
     try:
@@ -815,11 +961,15 @@ def show_video_info(chat_id, message_id, video_id):
         except:
             pass
     
+    file_ids = video.get('file_ids', [])
+    video_count = len(file_ids)
+    
     info_text = f"""
 📊 **اطلاعات ویدیو**
 
 📝 **نام:** {video['name']}
 🆔 **شناسه:** `{video['id']}`
+📹 **تعداد ویدیوها:** {video_count}
 📥 **تعداد دانلود:** {downloads}
 📅 **تاریخ اضافه شدن:** {added_date}
 ⏱️ **زمان حذف:** {video['delete_time']} ثانیه
@@ -836,7 +986,6 @@ def show_video_info(chat_id, message_id, video_id):
 # ==================== VIDEO SENDING ====================
 def send_video_to_user(chat_id, video, user_id):
     try:
-        # بررسی وجود ویدیو در لیست
         video_check = get_video(video["id"])
         if not video_check:
             bot.send_message(chat_id, "❌ ویدیوی مورد نظر وجود ندارد")
@@ -845,48 +994,71 @@ def send_video_to_user(chat_id, video, user_id):
         # Track view
         increment_view_count(video["id"])
         
-        # ارسال ویدیو
-        video_msg = bot.send_video(
-            chat_id,
-            video["file_id"]
-        )
+        # Get all file_ids
+        file_ids = video.get("file_ids", [])
+        if not file_ids and "file_id" in video:
+            file_ids = [video["file_id"]]
         
-        # ارسال پیام جداگانه برای هشدار
+        # Send all videos
+        video_messages = []
+        for i, file_id in enumerate(file_ids):
+            try:
+                if i == 0:
+                    caption = f"📹 {video['name']}"
+                else:
+                    caption = f"📹 {video['name']} - قسمت {i+1}"
+                
+                video_msg = bot.send_video(
+                    chat_id,
+                    file_id,
+                    caption=caption
+                )
+                video_messages.append(video_msg.message_id)
+                time.sleep(0.5)  # Small delay between videos
+            except Exception as e:
+                print(f"Error sending video {i+1}: {e}")
+        
+        # Send warning message
         bot.send_message(
             chat_id,
-            "⏰ **این ویدیو به زودی حذف خواهد شد. لطفاً ذخیره کنید.**",
+            "⏰ **این ویدیوها به زودی حذف خواهند شد. لطفاً ذخیره کنید.**",
             parse_mode='Markdown'
         )
         
+        # Schedule deletion for all videos
         delete_after = video["delete_time"]
-        threading.Thread(target=schedule_delete, args=(chat_id, video_msg.message_id, video, delete_after)).start()
+        threading.Thread(target=schedule_delete_multiple, args=(chat_id, video_messages, video, delete_after)).start()
         
     except Exception as e:
         bot.send_message(chat_id, "❌ خطا در ارسال ویدیو! لطفاً دوباره تلاش کنید.")
         print(f"Error sending video: {e}")
 
-def schedule_delete(chat_id, message_id, video, delay):
-    """حذف ویدیو بعد از زمان مشخص شده"""
+def schedule_delete_multiple(chat_id, message_ids, video, delay):
+    """حذف چند ویدیو بعد از زمان مشخص شده"""
     time.sleep(delay)
     try:
-        # بررسی وجود ویدیو قبل از حذف
         video_check = get_video(video["id"])
         if not video_check:
-            # اگر ویدیو وجود نداشت، پیام خطا ارسال کن
             bot.send_message(
                 chat_id,
                 "❌ ویدیوی مورد نظر وجود ندارد"
             )
             return
-            
-        bot.delete_message(chat_id, message_id)
+        
+        # Delete all video messages
+        for msg_id in message_ids:
+            try:
+                bot.delete_message(chat_id, msg_id)
+                time.sleep(0.3)  # Small delay to avoid rate limiting
+            except Exception as e:
+                print(f"Error deleting message {msg_id}: {e}")
         
         keyboard = types.InlineKeyboardMarkup()
         keyboard.add(create_glass_button("🔄 دانلود مجدد", f"check_sponsors_{video['id']}"))
         
         bot.send_message(
             chat_id,
-            f"⏰ **ویدیو حذف شد.**\nبرای دانلود مجدد، روی دکمه زیر کلیک کنید.",
+            f"⏰ **ویدیوها حذف شدند.**\nبرای دانلود مجدد، روی دکمه زیر کلیک کنید.",
             reply_markup=keyboard,
             parse_mode='Markdown'
         )
